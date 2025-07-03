@@ -1,10 +1,10 @@
 import platform
 import os
 import re
-import time
 import calendar
 import tempfile
 import zipfile
+import subprocess
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -14,6 +14,43 @@ import inflect
 import streamlit as st
 from docxtpl import DocxTemplate
 
+# Try to import PDF converters
+try:
+    from docx2pdf import convert as docx2pdf_convert
+except ImportError:
+    docx2pdf_convert = None
+
+import pypandoc
+
+# --- Pandoc Setup for Linux/Streamlit Cloud ---
+def setup_pandoc():
+    """Set up pandoc manually if not found (for Linux/Streamlit Cloud)."""
+    try:
+        if not pypandoc.get_pandoc_path():
+            pandoc_dir = Path("pandoc")
+            pandoc_dir.mkdir(exist_ok=True)
+            deb_path = pandoc_dir / "pandoc.deb"
+            url = "https://github.com/jgm/pandoc/releases/download/3.1.11.1/pandoc-3.1.11.1-1-amd64.deb"
+
+            subprocess.run(["wget", "-O", str(deb_path), url], check=True)
+            subprocess.run(["dpkg", "-x", str(deb_path), str(pandoc_dir)], check=True)
+
+            bin_path = pandoc_dir / "usr/bin"
+            os.environ["PATH"] = f"{bin_path}:{os.environ['PATH']}"
+            pypandoc.get_pandoc_path()  # Confirm it's available
+        return True
+    except Exception as e:
+        st.error(f"Failed to set up pandoc: {e}")
+        return False
+
+def convert_docx_to_pdf_pandoc(docx_path, pdf_output_path):
+    try:
+        output = pypandoc.convert_file(str(docx_path), 'pdf', outputfile=str(pdf_output_path))
+        return True
+    except Exception as e:
+        st.error(f"PDF conversion (pandoc) failed: {e}")
+        return False
+
 # --- STREAMLIT UI ---
 
 st.set_page_config(page_title="Invoice Generator", layout="wide")
@@ -21,10 +58,7 @@ st.title("📄 Automated Invoice Generator with PDF Export")
 
 st.markdown("Upload your Word Template and Excel File to begin:")
 
-# Upload Word Template
 word_template_file = st.file_uploader("Upload Word Template (.docx)", type=["docx"])
-
-# Upload Excel File
 excel_file = st.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
 
 if word_template_file and excel_file:
@@ -54,9 +88,7 @@ if word_template_file and excel_file:
     def number_to_words_currency(num):
         if isinstance(num, float):
             rupees, paise = str(num).split(".")
-            rupees_in_words = p.number_to_words(int(rupees)).capitalize()
-            paise_in_words = p.number_to_words(int(paise)).capitalize()
-            return f"{rupees_in_words} Rupees and {paise_in_words} Paise"
+            return f"{p.number_to_words(int(rupees)).capitalize()} Rupees and {p.number_to_words(int(paise)).capitalize()} Paise"
         else:
             return p.number_to_words(int(num)).capitalize() + " Rupees"
 
@@ -69,6 +101,10 @@ if word_template_file and excel_file:
     total_records = len(df)
     progress = st.progress(0)
     status_text = st.empty()
+
+    # Setup pandoc if needed
+    if platform.system() not in ['Windows', 'Darwin']:
+        setup_pandoc()
 
     for counter, record in enumerate(df.to_dict(orient="records"), start=1):
         fiscal_year = str(record['Fiscal_Year'])
@@ -87,7 +123,6 @@ if word_template_file and excel_file:
         invoice_no = sanitize_filename(str(record['Supplier_Invoice_No']))
         address_3 = sanitize_filename(str(record['Address_3']))
 
-        # Directory structure
         address_3_dir = output_dir / address_3 / fiscal_year / month_name
         address_3_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,24 +130,26 @@ if word_template_file and excel_file:
         docx_path = pdf_output_path.with_suffix(".docx")
         doc.save(docx_path)
 
-        # ✅ Convert DOCX to PDF using docx2pdf
-        if platform.system() in ['Windows', 'Darwin']:  # Darwin = macOS
+        # --- Convert DOCX to PDF ---
+        if platform.system() in ['Windows', 'Darwin'] and docx2pdf_convert:
             try:
-                convert(str(docx_path), str(pdf_output_path))
+                docx2pdf_convert(str(docx_path), str(pdf_output_path))
                 os.remove(docx_path)
             except Exception as e:
-                st.error(f"Error converting to PDF: {e}")
+                st.error(f"docx2pdf failed: {e}")
         else:
-            st.warning("PDF conversion is only supported on Windows and macOS. DOCX file saved instead.")
+            if convert_docx_to_pdf_pandoc(docx_path, pdf_output_path):
+                os.remove(docx_path)
+            else:
+                st.warning("PDF conversion failed. DOCX saved instead.")
 
         progress.progress(counter / total_records)
         status_text.text(f"Generated {counter}/{total_records} invoices.")
 
     st.success("✅ All invoices generated and saved as PDFs in the OUTPUT folder.")
 
-    # --- ZIP AND DOWNLOAD ---
+    # --- ZIP and Download ---
     zip_buffer = BytesIO()
-
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for folder_path, _, files in os.walk(output_dir):
             for file in files:
@@ -120,7 +157,6 @@ if word_template_file and excel_file:
                     file_path = os.path.join(folder_path, file)
                     arcname = os.path.relpath(file_path, output_dir)
                     zipf.write(file_path, arcname=arcname)
-
     zip_buffer.seek(0)
 
     st.download_button(
