@@ -3,3 +3,4 @@ pandas
 inflect
 docxtpl
 docx2pdf
+openpyxl
