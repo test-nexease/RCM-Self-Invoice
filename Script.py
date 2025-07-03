@@ -1,3 +1,4 @@
+import platform
 import os
 import re
 import time
@@ -96,11 +97,14 @@ if word_template_file and excel_file:
         doc.save(docx_path)
 
         # ✅ Convert DOCX to PDF using docx2pdf
-        try:
-            convert(str(docx_path), str(pdf_output_path))
-            os.remove(docx_path)
-        except Exception as e:
-            st.error(f"Error converting to PDF: {e}")
+        if platform.system() in ['Windows', 'Darwin']:  # Darwin = macOS
+            try:
+                convert(str(docx_path), str(pdf_output_path))
+                os.remove(docx_path)
+            except Exception as e:
+                st.error(f"Error converting to PDF: {e}")
+        else:
+            st.warning("PDF conversion is only supported on Windows and macOS. DOCX file saved instead.")
 
         progress.progress(counter / total_records)
         status_text.text(f"Generated {counter}/{total_records} invoices.")
