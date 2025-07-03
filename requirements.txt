@@ -1,6 +1,7 @@
 streamlit
 pandas
-inflect
 docxtpl
-docx2pdf
+mammoth
+fpdf
+inflect
 openpyxl
