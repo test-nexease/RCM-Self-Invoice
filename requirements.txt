@@ -1,7 +1,7 @@
-pypandoc
 streamlit
 pandas
 docxtpl
 fpdf
 inflect
 openpyxl
+subprocess
