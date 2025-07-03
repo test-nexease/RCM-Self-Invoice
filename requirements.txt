@@ -4,4 +4,3 @@ docxtpl
 fpdf
 inflect
 openpyxl
-subprocess
