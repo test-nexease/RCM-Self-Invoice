@@ -12,7 +12,8 @@ import pandas as pd
 import inflect
 import streamlit as st
 from docxtpl import DocxTemplate
-from docx2pdf import convert 
+import mammoth
+from fpdf import FPDF
 
 # --- STREAMLIT UI ---
 
@@ -27,6 +28,33 @@ word_template_file = st.file_uploader("Upload Word Template (.docx)", type=["doc
 # Upload Excel File
 excel_file = st.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
 
+def sanitize_filename(filename):
+    return re.sub(r'[\\/*?:"<>|]', '_', filename)
+
+def number_to_words_currency(num):
+    p = inflect.engine()
+    if isinstance(num, float):
+        rupees, paise = str(num).split(".")
+        rupees_in_words = p.number_to_words(int(rupees)).capitalize()
+        paise_in_words = p.number_to_words(int(paise)).capitalize()
+        return f"{rupees_in_words} Rupees and {paise_in_words} Paise"
+    else:
+        return p.number_to_words(int(num)).capitalize() + " Rupees"
+
+def extract_text_from_docx(docx_file_path):
+    with open(docx_file_path, "rb") as docx_file:
+        result = mammoth.convert_to_text(docx_file)
+    return result.value
+
+def save_text_to_pdf(text, pdf_path):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("Arial", size=12)
+    for line in text.split('\n'):
+        pdf.multi_cell(0, 10, line)
+    pdf.output(str(pdf_path))
+
 if word_template_file and excel_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_word:
         tmp_word.write(word_template_file.read())
@@ -37,7 +65,6 @@ if word_template_file and excel_file:
         excel_path = tmp_excel.name
 
     # --- PROCESSING ---
-
     output_dir = Path.cwd() / "OUTPUT"
     output_dir.mkdir(exist_ok=True)
 
@@ -48,22 +75,7 @@ if word_template_file and excel_file:
     df['GST_Rate'] = df[['Tax_Rate1', 'Tax_Rate_2', 'Tax_Rate_3']].sum(axis=1)
     df['Invoice_Number'] = 'SMRTIPL/' + df['State_Code'].astype(str) + '/RCM/' + df['Fiscal_Period'].astype(str) + '-' + df['Fiscal_Year'].astype(str)
     df['Accounting_Date'] = pd.to_datetime(df['Accounting_Date']).dt.date
-
-    p = inflect.engine()
-
-    def number_to_words_currency(num):
-        if isinstance(num, float):
-            rupees, paise = str(num).split(".")
-            rupees_in_words = p.number_to_words(int(rupees)).capitalize()
-            paise_in_words = p.number_to_words(int(paise)).capitalize()
-            return f"{rupees_in_words} Rupees and {paise_in_words} Paise"
-        else:
-            return p.number_to_words(int(num)).capitalize() + " Rupees"
-
     df['In_Words'] = df['Total_Amount'].apply(number_to_words_currency)
-
-    def sanitize_filename(filename):
-        return re.sub(r'[\\/*?:"<>|]', '_', filename)
 
     state_sequence = {}
     total_records = len(df)
@@ -95,12 +107,13 @@ if word_template_file and excel_file:
         docx_path = pdf_output_path.with_suffix(".docx")
         doc.save(docx_path)
 
-        # ✅ Convert DOCX to PDF using docx2pdf
+        # ✅ Convert DOCX to PDF using mammoth + fpdf
         try:
-            convert(str(docx_path), str(pdf_output_path))
+            extracted_text = extract_text_from_docx(str(docx_path))
+            save_text_to_pdf(extracted_text, str(pdf_output_path))
             os.remove(docx_path)
         except Exception as e:
-            st.error(f"Error converting to PDF: {e}")
+            st.error(f"Error generating PDF: {e}")
 
         progress.progress(counter / total_records)
         status_text.text(f"Generated {counter}/{total_records} invoices.")
