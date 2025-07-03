@@ -1,133 +1,131 @@
 import os
-from pathlib import Path
-import pandas as pd
-from docxtpl import DocxTemplate
 import re
-import inflect
-from datetime import datetime
-import win32com.client
 import time
-import calendar  # To get the full month name
-import tkinter as tk
-from tkinter import filedialog
+import calendar
+import tempfile
+import zipfile
+from io import BytesIO
+from pathlib import Path
+from datetime import datetime
 
-# Initialize tkinter root for file dialog
-root = tk.Tk()
-root.withdraw()  # Hide the root window
+import pandas as pd
+import inflect
+import streamlit as st
+from docxtpl import DocxTemplate
+from docx2pdf import convert 
 
-# Open file dialog to select Word template file
-word_template_path = filedialog.askopenfilename(title="Select Word Template File", filetypes=[("Word Files", "*.docx")])
-if not word_template_path:
-    print("No Word template selected. Exiting...")
-    exit()
+# --- STREAMLIT UI ---
 
-# Open file dialog to select Excel file
-excel_path = filedialog.askopenfilename(title="Select Excel File", filetypes=[("Excel Files", "*.xlsx")])
-if not excel_path:
-    print("No Excel file selected. Exiting...")
-    exit()
+st.set_page_config(page_title="Invoice Generator", layout="wide")
+st.title("📄 Automated Invoice Generator with PDF Export")
 
-# Define output directory
-output_dir = Path.cwd() / "OUTPUT"
-output_dir.mkdir(exist_ok=True)
+st.markdown("Upload your Word Template and Excel File to begin:")
 
-# Load the Excel file
-df = pd.read_excel(excel_path, sheet_name="Sheet2")
-df1 = pd.read_excel(excel_path, sheet_name="Sheet1")
-df = pd.merge(df, df1, on="GSTIN", how='inner')
-df['Total_Amount'] = df[['CGST', 'SGST', 'IGST', 'Taxable_Value']].sum(axis=1)
-df['GST_Rate'] = df[['Tax_Rate1', 'Tax_Rate_2', 'Tax_Rate_3']].sum(axis=1)
-df['Invoice_Number'] = 'SMRTIPL/'+df['State_Code'].astype(str)+'/RCM/' + df['Fiscal_Period'].astype(str)+'-' + df['Fiscal_Year'].astype(str)
-df['Accounting_Date'] = pd.to_datetime(df['Accounting_Date']).dt.date
+# Upload Word Template
+word_template_file = st.file_uploader("Upload Word Template (.docx)", type=["docx"])
 
-p = inflect.engine()
+# Upload Excel File
+excel_file = st.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
 
-def number_to_words_currency(num):
-    if isinstance(num, float):
-        rupees, paise = str(num).split(".")
-        rupees_in_words = p.number_to_words(int(rupees)).capitalize()
-        paise_in_words = p.number_to_words(int(paise)).capitalize()
-        return f"{rupees_in_words} Rupees and {paise_in_words} Paise"
-    else:
-        return p.number_to_words(int(num)).capitalize() + " Rupees"
+if word_template_file and excel_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_word:
+        tmp_word.write(word_template_file.read())
+        word_template_path = tmp_word.name
 
-df['In_Words'] = df['Total_Amount'].apply(number_to_words_currency)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_excel:
+        tmp_excel.write(excel_file.read())
+        excel_path = tmp_excel.name
 
-def sanitize_filename(filename):
-    return re.sub(r'[\\/*?:"<>|]', '_', filename)
+    # --- PROCESSING ---
 
-# Initialize dictionary for state-specific sequence numbers
-state_sequence = {}
+    output_dir = Path.cwd() / "OUTPUT"
+    output_dir.mkdir(exist_ok=True)
 
-# Initialize counter for tracking progress
-total_records = len(df)
-counter = 0
+    df = pd.read_excel(excel_path, sheet_name="Sheet2")
+    df1 = pd.read_excel(excel_path, sheet_name="Sheet1")
+    df = pd.merge(df, df1, on="GSTIN", how='inner')
+    df['Total_Amount'] = df[['CGST', 'SGST', 'IGST', 'Taxable_Value']].sum(axis=1)
+    df['GST_Rate'] = df[['Tax_Rate1', 'Tax_Rate_2', 'Tax_Rate_3']].sum(axis=1)
+    df['Invoice_Number'] = 'SMRTIPL/' + df['State_Code'].astype(str) + '/RCM/' + df['Fiscal_Period'].astype(str) + '-' + df['Fiscal_Year'].astype(str)
+    df['Accounting_Date'] = pd.to_datetime(df['Accounting_Date']).dt.date
 
-for record in df.to_dict(orient="records"):
-    fiscal_year = str(record['Fiscal_Year'])
-    fiscal_period = str(record['Fiscal_Period']).zfill(2)  # Ensure fiscal period is 2 digits, e.g., '01', '02', etc.
-    
-    # Convert Fiscal_Period (month number) to full month name
-    month_name = calendar.month_name[int(fiscal_period)]  # Get full month name (e.g., "January", "February")
-    
-    # Create the invoice number with the state-specific sequence counter
-    state_code = record['State_Code']
-    if state_code not in state_sequence:
-        state_sequence[state_code] = 1
-    else:
-        state_sequence[state_code] += 1
-    invoice_number = f"SMRTIPL/{state_code}/{record['Fiscal_Period']}-{record['Fiscal_Year']}-{state_sequence[state_code]:04d}"
-    record['Invoice_Number'] = invoice_number  # Update the Invoice_Number field with the state-specific sequence number
-    
-    doc = DocxTemplate(word_template_path)
-    doc.render(record)
-    
-    vendor = sanitize_filename(str(record['Vendor']))
-    invoice_no = sanitize_filename(str(record['Supplier_Invoice_No']))
-    
-    # Get Address_3, Fiscal_Year, and Fiscal_Period (converted to full month name)
-    address_3 = sanitize_filename(str(record['Address_3']))
-    
-    # Create the directory structure based on Address_3, Fiscal_Year, and full month name for Fiscal_Period
-    address_3_dir = output_dir / address_3  # Address_3 directory
-    fiscal_year_dir = address_3_dir / fiscal_year  # Fiscal Year directory
-    fiscal_period_dir = fiscal_year_dir / month_name  # Fiscal Period as full month name (e.g., "January")
-    
-    # Create all directories if they don't exist
-    fiscal_period_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Set the output path for the PDF
-    pdf_output_path = fiscal_period_dir / f"{fiscal_year}_{month_name}_{vendor}_{invoice_no}.pdf"
-    
-    # Save the document as .docx
-    doc.save(pdf_output_path.with_suffix(".docx"))
+    p = inflect.engine()
 
-    # Convert the .docx to .pdf using Word
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    doc = word.Documents.Open(str(pdf_output_path.with_suffix(".docx")))
-    
-    # Save as PDF
-    doc.SaveAs(str(pdf_output_path), FileFormat=17)  # 17 is the constant for PDF format
-    
-    # Wait for the save to finish
-    time.sleep(1)  # Add a small delay to ensure the file is saved properly
-    
-    # Close the Word document
-    doc.Close()
-    
-    # Quit Word application
-    word.Quit()
+    def number_to_words_currency(num):
+        if isinstance(num, float):
+            rupees, paise = str(num).split(".")
+            rupees_in_words = p.number_to_words(int(rupees)).capitalize()
+            paise_in_words = p.number_to_words(int(paise)).capitalize()
+            return f"{rupees_in_words} Rupees and {paise_in_words} Paise"
+        else:
+            return p.number_to_words(int(num)).capitalize() + " Rupees"
 
-    # Optionally, delete the .docx file after saving the PDF
-    try:
-        os.remove(pdf_output_path.with_suffix(".docx"))
-    except PermissionError:
-        print(f"PermissionError: The file {pdf_output_path.with_suffix('.docx')} is still in use and could not be deleted.")
-    
-    # Increment the counter and print the progress
-    counter += 1
-    os.system('cls')
-    print(f"Converted and saved {counter}/{total_records} PDFs.")
+    df['In_Words'] = df['Total_Amount'].apply(number_to_words_currency)
 
-print("Conversion to PDF completed for all documents.")
+    def sanitize_filename(filename):
+        return re.sub(r'[\\/*?:"<>|]', '_', filename)
+
+    state_sequence = {}
+    total_records = len(df)
+    progress = st.progress(0)
+    status_text = st.empty()
+
+    for counter, record in enumerate(df.to_dict(orient="records"), start=1):
+        fiscal_year = str(record['Fiscal_Year'])
+        fiscal_period = str(record['Fiscal_Period']).zfill(2)
+        month_name = calendar.month_name[int(fiscal_period)]
+
+        state_code = record['State_Code']
+        state_sequence[state_code] = state_sequence.get(state_code, 0) + 1
+        invoice_number = f"SMRTIPL/{state_code}/{fiscal_period}-{fiscal_year}-{state_sequence[state_code]:04d}"
+        record['Invoice_Number'] = invoice_number
+
+        doc = DocxTemplate(word_template_path)
+        doc.render(record)
+
+        vendor = sanitize_filename(str(record['Vendor']))
+        invoice_no = sanitize_filename(str(record['Supplier_Invoice_No']))
+        address_3 = sanitize_filename(str(record['Address_3']))
+
+        # Directory structure
+        address_3_dir = output_dir / address_3 / fiscal_year / month_name
+        address_3_dir.mkdir(parents=True, exist_ok=True)
+
+        pdf_output_path = address_3_dir / f"{fiscal_year}_{month_name}_{vendor}_{invoice_no}.pdf"
+        docx_path = pdf_output_path.with_suffix(".docx")
+        doc.save(docx_path)
+
+        # ✅ Convert DOCX to PDF using docx2pdf
+        try:
+            convert(str(docx_path), str(pdf_output_path))
+            os.remove(docx_path)
+        except Exception as e:
+            st.error(f"Error converting to PDF: {e}")
+
+        progress.progress(counter / total_records)
+        status_text.text(f"Generated {counter}/{total_records} invoices.")
+
+    st.success("✅ All invoices generated and saved as PDFs in the OUTPUT folder.")
+
+    # --- ZIP AND DOWNLOAD ---
+    zip_buffer = BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for folder_path, _, files in os.walk(output_dir):
+            for file in files:
+                if file.endswith(".pdf"):
+                    file_path = os.path.join(folder_path, file)
+                    arcname = os.path.relpath(file_path, output_dir)
+                    zipf.write(file_path, arcname=arcname)
+
+    zip_buffer.seek(0)
+
+    st.download_button(
+        label="📥 Download All PDFs as ZIP",
+        data=zip_buffer,
+        file_name="invoices.zip",
+        mime="application/zip"
+    )
+
+else:
+    st.info("Please upload both Word and Excel files to proceed.")
