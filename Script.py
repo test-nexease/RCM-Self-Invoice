@@ -109,7 +109,7 @@ if word_template_file and excel_file:
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for folder_path, _, files in os.walk(output_dir):
             for file in files:
-                if file.endswith(".docx"):
+                if file.endswith(".pdf"):
                     file_path = os.path.join(folder_path, file)
                     arcname = os.path.relpath(file_path, output_dir)
                     zipf.write(file_path, arcname=arcname)
